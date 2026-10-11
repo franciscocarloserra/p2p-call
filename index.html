@@ -11,67 +11,13 @@
   #status{flex:1}
   #bar button{all:unset;cursor:pointer;text-decoration:underline}
   #bar button.off{color:#c55}
-  #grid{flex:1;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:4px;padding:4px;overflow-y:auto}
-  video{width:100%;height:100%;max-height:calc(100dvh - 50px);object-fit:cover;background:#000;border-radius:4px}
+  #grid{flex:1;min-height:0;display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:4px;padding:4px}
+  @media (orientation:portrait){#grid{grid-auto-flow:row;grid-auto-rows:1fr}}
+  video{width:100%;height:100%;min-height:0;object-fit:cover;background:#000;border-radius:4px}
   #me{transform:scaleX(-1)}
   #lobby{margin:auto;display:flex;flex-direction:column;gap:12px}
   #lobby button{padding:16px 28px;font:inherit;background:#222;color:#eee;border:1px solid #444;border-radius:6px;cursor:pointer}
 </style></head><body>
 <div id="bar"><span id="status">idle</span><button id="mic">mic</button><button id="cam">cam</button><button id="copy">share link</button></div>
 <div id="grid"><div id="lobby"><button id="start">join call</button><button id="share">share link</button></div></div>
-<script type="module">
-window.onerror = window.onunhandledrejection = e => { document.getElementById('status').textContent = 'error: ' + (e.reason || e.message || e); };
-import {joinCall} from './call.js';
-
-// Tunable parameters
-const P = {
-  "copiedFeedbackMs": 1500
-};
-const $ = id => document.getElementById(id);
-
-const videos = new Map(); // peerId -> <video>
-let call;
-// Peer count plus what each remote is actually sending (a = audio, v = video)
-const status = () => call && ($('status').textContent = `peers ${call.peerCount()} ` +
-  [...videos].filter(([id]) => id !== 'me').map(([, v]) => v.srcObject.getTracks().map(t => t.kind[0]).join('')).join(' '));
-
-function addVideo(id, s, muted) {
-  const v = videos.get(id) ?? document.createElement('video');
-  v.autoplay = v.playsInline = true;
-  v.muted = muted;
-  v.srcObject = s;
-  if (!videos.has(id)) { videos.set(id, v); $('grid').append(v); }
-  s.onaddtrack = status;
-  // If the browser blocks audible autoplay, the next click starts it
-  v.play().catch(() => { $('status').textContent = 'click to hear'; addEventListener('pointerdown', () => v.play(), {once: true}); });
-  return v;
-}
-
-// Join only after a click: the gesture unlocks camera prompt and remote audio autoplay
-$('start').onclick = async () => {
-  call = await joinCall({
-    onPeerJoin: status,
-    onPeerLeave: peer => { videos.get(peer)?.remove(); videos.delete(peer); status(); },
-    onStream: (s, peer) => { addVideo(peer, s, false); status(); }
-  });
-  $('lobby').remove();
-  if (call.has('video')) addVideo('me', call.stream, true).id = 'me';
-  $('mic').classList.toggle('off', !call.has('audio'));
-  $('cam').classList.toggle('off', !call.has('video'));
-  status();
-};
-
-$('mic').onclick = () => call && $('mic').classList.toggle('off', !call.toggle('audio'));
-$('cam').onclick = () => call && $('cam').classList.toggle('off', !call.toggle('video'));
-
-// Native share sheet on mobile, clipboard elsewhere
-async function share(btn) {
-  if (navigator.share) return navigator.share({url: location.href}).catch(() => {});
-  await navigator.clipboard.writeText(location.href);
-  const label = btn.textContent;
-  btn.textContent = 'copied';
-  setTimeout(() => btn.textContent = label, P.copiedFeedbackMs);
-}
-$('copy').onclick = () => share($('copy'));
-$('share').onclick = () => share($('share'));
-</script></body></html>
+<script type="module" src="ui.js"></script></body></html>

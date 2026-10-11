@@ -6,4 +6,4 @@ Live: https://franciscocarloserra.github.io/p2p-call/ — or open `index.html`, 
 
 Camera/mic need HTTPS or `localhost`. Peers behind strict NATs may fail to connect (no TURN server).
 
-`call.js` is the core (session from the URL hash, media, trystero room) with no DOM; `index.html` is only the UI on top of it.
+`call.js` is the core (session from the URL hash, media, trystero room, auto-rejoin) with no DOM; `ui.js` + `index.html` are the UI on top of it.

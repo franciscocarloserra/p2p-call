@@ -8,6 +8,8 @@ const P = {
   "videoWidth": 640,
   "videoHeight": 480,
   "videoFps": 24,
+  "aloneRetryMs": 15000,
+  "watchdogMs": 3000,
   "relayUrls": ["wss://nos.lol", "wss://relay.primal.net", "wss://nostr.mom"]
 };
 
@@ -28,19 +30,38 @@ async function getMedia() {
   return new MediaStream();
 }
 
-// Callbacks: onPeerJoin(peer), onPeerLeave(peer), onStream(stream, peer)
-export async function joinCall({onPeerJoin, onPeerLeave, onStream} = {}) {
+// Callbacks: onPeerJoin(peer), onPeerLeave(peer), onStream(stream, peer), onReconnect()
+export async function joinCall({onPeerJoin, onPeerLeave, onStream, onReconnect} = {}) {
   const stream = await getMedia();
   const cfg = {appId: P.appId, password};
   if (P.relayUrls.length) cfg.relayConfig = {urls: P.relayUrls};
-  const r = joinRoom(cfg, room);
-  r.addStream(stream); // to peers already connected
-  r.onPeerJoin = peer => { r.addStream(stream, {target: peer}); onPeerJoin?.(peer); };
-  r.onPeerLeave = peer => onPeerLeave?.(peer);
-  r.onPeerStream = (s, peer) => onStream?.(s, peer);
+  let r, aloneSince = Date.now();
+  const peerCount = () => Object.keys(r.getPeers()).length;
+
+  function connect() {
+    r = joinRoom(cfg, room);
+    r.addStream(stream); // to peers already connected
+    r.onPeerJoin = peer => { r.addStream(stream, {target: peer}); onPeerJoin?.(peer); };
+    r.onPeerLeave = peer => { if (!peerCount()) aloneSince = Date.now(); onPeerLeave?.(peer); };
+    r.onPeerStream = (s, peer) => onStream?.(s, peer);
+  }
+  // Trystero restarts ICE and retries relays on its own, but relays can give up for good
+  // after repeated drops. If we stay alone too long (or the network comes back), rejoin from scratch.
+  async function rejoin() {
+    if (peerCount()) return;
+    aloneSince = Date.now();
+    onReconnect?.();
+    try { await r.leave(); } catch {}
+    connect();
+  }
+  connect();
+  const watchdog = setInterval(() => { if (!peerCount() && Date.now() - aloneSince > P.aloneRetryMs) rejoin(); }, P.watchdogMs);
+  addEventListener('online', rejoin);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) rejoin(); });
+
   return {
     stream,
-    peerCount: () => Object.keys(r.getPeers()).length,
+    peerCount,
     has: kind => stream.getTracks().some(t => t.kind === kind),
     // kind: 'audio' | 'video'. Returns whether it's on after toggling.
     toggle: kind => {
@@ -48,6 +69,6 @@ export async function joinCall({onPeerJoin, onPeerLeave, onStream} = {}) {
       tracks.forEach(t => t.enabled = !t.enabled);
       return !!tracks[0]?.enabled;
     },
-    leave: () => { stream.getTracks().forEach(t => t.stop()); return r.leave(); }
+    leave: () => { clearInterval(watchdog); removeEventListener('online', rejoin); stream.getTracks().forEach(t => t.stop()); return r.leave(); }
   };
 }
