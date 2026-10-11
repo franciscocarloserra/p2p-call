@@ -9,8 +9,9 @@ const P = {
   "videoHeight": 480,
   "videoFps": 24,
   "aloneRetryMs": 15000,
-  "dropRejoinMs": 4000,
-  "socketResetCooldownMs": 10000,
+  "linkGraceMs": 1500,
+  "retryMinMs": 2000,
+  "retryMaxMs": 60000,
   "watchdogMs": 3000,
   "relayUrls": ["wss://nos.lol", "wss://relay.primal.net", "wss://nostr.mom"]
 };
@@ -28,12 +29,7 @@ const sockets = new Set();
 window.WebSocket = class extends WebSocket {
   constructor(...a) { super(...a); sockets.add(this); this.addEventListener('close', () => sockets.delete(this)); }
 };
-let lastReset = 0;
-function resetSockets() {
-  if (Date.now() - lastReset < P.socketResetCooldownMs) return;
-  lastReset = Date.now();
-  sockets.forEach(s => s.close());
-}
+const resetSockets = () => sockets.forEach(s => s.close());
 
 // Missing devices are fine: fall back to audio only, video only, or watch only
 async function getMedia() {
@@ -50,38 +46,51 @@ export async function joinCall({onPeerJoin, onPeerLeave, onStream, onReconnect} 
   const stream = await getMedia();
   const cfg = {appId: P.appId, password};
   if (P.relayUrls.length) cfg.relayConfig = {urls: P.relayUrls};
-  let r, aloneSince = Date.now(), hadPeers = false;
+  let r, aloneSince = Date.now(), lastRejoin = 0, retryMs = P.retryMinMs;
   const peerCount = () => Object.keys(r.getPeers()).length;
+  const anyLinkUp = () => Object.values(r.getPeers()).some(pc => pc.connectionState === 'connected');
 
   function connect() {
     r = joinRoom(cfg, room);
     r.addStream(stream); // to peers already connected
-    r.onPeerJoin = peer => { hadPeers = true; r.addStream(stream, {target: peer}); onPeerJoin?.(peer); };
+    r.onPeerJoin = peer => {
+      retryMs = P.retryMinMs; // healthy again: reset backoff
+      r.addStream(stream, {target: peer});
+      watchLink(r.getPeers()[peer]);
+      onPeerJoin?.(peer);
+    };
     r.onPeerLeave = peer => { if (!peerCount()) aloneSince = Date.now(); onPeerLeave?.(peer); };
     r.onPeerStream = (s, peer) => onStream?.(s, peer);
   }
-  // Trystero restarts ICE and retries relays on its own, but relays can give up for good
-  // after repeated drops. If we stay alone too long (or the network comes back), rejoin from scratch.
+
+  // A network switch kills every link at once. Trystero would wait ~5 s per link and then ~10+ s to
+  // rediscover; instead rejoin as soon as all links stay down for a short grace (jitter shouldn't trigger it).
+  function watchLink(pc) {
+    let grace;
+    pc?.addEventListener('connectionstatechange', () => {
+      clearTimeout(grace);
+      if (pc.connectionState === 'failed') rejoin();
+      else if (pc.connectionState === 'disconnected') grace = setTimeout(() => { if (!anyLinkUp()) rejoin(); }, P.linkGraceMs);
+    });
+  }
+
+  // Leave and join again over fresh relay sockets. Rate-limited with exponential backoff
+  // (reset on the next successful join) so a flaky network doesn't spam the Nostr relays.
   async function rejoin() {
-    if (peerCount()) return;
-    aloneSince = Date.now();
-    hadPeers = false;
+    if (anyLinkUp() || Date.now() - lastRejoin < retryMs) return;
+    lastRejoin = aloneSince = Date.now();
+    retryMs = Math.min(retryMs * 2, P.retryMaxMs);
     onReconnect?.();
     try { await r.leave(); } catch {}
+    resetSockets();
     connect();
   }
+
   connect();
-  // Network change: fresh relay sockets, and rejoin if that left us alone.
-  // Detected via the connection API (Android Chrome), the online event, or a peer link going down (everywhere else).
-  const onNetworkChange = () => { resetSockets(); rejoin(); };
-  const watchdog = setInterval(() => {
-    const links = Object.values(r.getPeers()).map(pc => pc.connectionState);
-    if (links.some(st => st === 'disconnected' || st === 'failed')) resetSockets();
-    const wait = hadPeers ? P.dropRejoinMs : P.aloneRetryMs; // lost everyone: come back fast
-    if (!peerCount() && Date.now() - aloneSince > wait) rejoin();
-  }, P.watchdogMs);
-  addEventListener('online', onNetworkChange);
-  navigator.connection?.addEventListener('change', onNetworkChange);
+  const watchdog = setInterval(() => { if (!peerCount() && Date.now() - aloneSince > P.aloneRetryMs) rejoin(); }, P.watchdogMs);
+  // Network change signals: connection API (Android Chrome), online event, back from background
+  addEventListener('online', rejoin);
+  navigator.connection?.addEventListener('change', rejoin);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) rejoin(); });
 
   return {
@@ -94,6 +103,6 @@ export async function joinCall({onPeerJoin, onPeerLeave, onStream, onReconnect} 
       tracks.forEach(t => t.enabled = !t.enabled);
       return !!tracks[0]?.enabled;
     },
-    leave: () => { clearInterval(watchdog); removeEventListener('online', onNetworkChange); navigator.connection?.removeEventListener('change', onNetworkChange); stream.getTracks().forEach(t => t.stop()); return r.leave(); }
+    leave: () => { clearInterval(watchdog); removeEventListener('online', rejoin); navigator.connection?.removeEventListener('change', rejoin); stream.getTracks().forEach(t => t.stop()); return r.leave(); }
   };
 }
