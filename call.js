@@ -41,21 +41,23 @@ async function getMedia() {
   return new MediaStream();
 }
 
-// Callbacks: onPeerJoin(peer), onPeerLeave(peer), onStream(stream, peer), onReconnect()
-export async function joinCall({onPeerJoin, onPeerLeave, onStream, onReconnect} = {}) {
+// Callbacks: onPeerJoin(peer), onPeerLeave(peer), onStream(stream, peer), onReconnect(), onScreenEnd()
+export async function joinCall({onPeerJoin, onPeerLeave, onStream, onReconnect, onScreenEnd} = {}) {
   const stream = await getMedia();
   const cfg = {appId: P.appId, password};
   if (P.relayUrls.length) cfg.relayConfig = {urls: P.relayUrls};
-  let r, aloneSince = Date.now(), lastRejoin = 0, retryMs = P.retryMinMs;
+  let r, screen, aloneSince = Date.now(), lastRejoin = 0, retryMs = P.retryMinMs;
   const peerCount = () => Object.keys(r.getPeers()).length;
   const anyLinkUp = () => Object.values(r.getPeers()).some(pc => pc.connectionState === 'connected');
 
   function connect() {
     r = joinRoom(cfg, room);
     r.addStream(stream); // to peers already connected
+    if (screen) r.addStream(screen);
     r.onPeerJoin = peer => {
       retryMs = P.retryMinMs; // healthy again: reset backoff
       r.addStream(stream, {target: peer});
+      if (screen) r.addStream(screen, {target: peer});
       watchLink(r.getPeers()[peer]);
       onPeerJoin?.(peer);
     };
@@ -103,6 +105,14 @@ export async function joinCall({onPeerJoin, onPeerLeave, onStream, onReconnect} 
       tracks.forEach(t => t.enabled = !t.enabled);
       return !!tracks[0]?.enabled;
     },
-    leave: () => { clearInterval(watchdog); removeEventListener('online', rejoin); navigator.connection?.removeEventListener('change', rejoin); stream.getTracks().forEach(t => t.stop()); return r.leave(); }
+    // Screen share as a second stream; stopping from the browser's own bar also ends it. Returns whether it's on.
+    toggleScreen: async () => {
+      if (screen) { screen.getTracks().forEach(t => t.stop()); r.removeStream(screen); screen = null; return false; }
+      const s = await navigator.mediaDevices.getDisplayMedia({video: true, audio: true});
+      s.getVideoTracks()[0].onended = () => { if (screen === s) { r.removeStream(s); screen = null; onScreenEnd?.(); } };
+      r.addStream(screen = s);
+      return true;
+    },
+    leave: () => { clearInterval(watchdog); removeEventListener('online', rejoin); navigator.connection?.removeEventListener('change', rejoin); [stream, screen].forEach(s => s?.getTracks().forEach(t => t.stop())); return r.leave(); }
   };
 }
