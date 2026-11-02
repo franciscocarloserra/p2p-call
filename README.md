@@ -1,4 +1,4 @@
-# p2p-call
+# p2p-call - Browser to Browser Audio/Video/Screensharing
 
 Browser-to-browser audio/video call. No server: peers find each other through public Nostr relays (Trystero) and media goes over WebRTC directly.
 
